@@ -479,7 +479,7 @@ function buildLarge(data) {
   var ds = descRow.addText(desc); ds.font = Font.regularSystemFont(14); ds.textColor = new Color("ffffff", 0.8)
   descRow.addSpacer(8)
   var feels = descRow.addText("体感" + now.feelsLike + "°"); feels.font = Font.regularSystemFont(10); feels.textColor = new Color("ffffff", 0.5)
-  currentRow.addSpacer()
+  currentRow.addSpacer(20)
   var detailCol = currentRow.addStack(); detailCol.layoutVertically(); detailCol.topAlignContent()
   addDetailRow(detailCol, "humidity.fill", "湿度 " + now.humidity + "%"); detailCol.addSpacer(3)
   addDetailRow(detailCol, "wind", now.windDir + " " + now.windScale + "级"); detailCol.addSpacer(3)

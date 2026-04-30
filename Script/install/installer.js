@@ -26,7 +26,7 @@ Script.Installer = async function () {
 
   // ========== 下载函数 ==========
   async function downloadScript(fileName) {
-    var url = REPO_BASE + fileName
+    var url = REPO_BASE +'/'+ fileName
     var req = new Request(url)
     req.timeoutInterval = 30
     var code = await req.loadString()

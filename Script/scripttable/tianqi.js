@@ -1,6 +1,7 @@
 // ==========================================
 //  天气小组件 · Scriptable (iOS 16+)
 //  SF Symbols · 空气质量 · 多城市 · 锁屏
+//  下雨时自动切换为降雨量预报
 //  数据源: 和风天气 QWeather API
 // ==========================================
 "use strict"
@@ -64,6 +65,12 @@ function getSFIcon(code) {
   if (c === 900)                    return "thermometer.sun.fill"
   if (c === 901)                    return "thermometer.snowflake"
   return "cloud.fill"
+}
+
+// ★ 新增: 判断是否下雨
+function isRain(code) {
+  var c = parseInt(code, 10)
+  return c >= 300 && c <= 399
 }
 
 function getWeatherDesc(code) { return WD[code] || "未知" }
@@ -179,6 +186,120 @@ function drawDot(color, size) {
   return ctx.getImage()
 }
 
+// ★ 新增: 画单根降雨量柱子
+function drawPrecipBar(precip, maxPrecip, barW, barH) {
+  var ctx = new DrawContext()
+  ctx.size = new Size(barW, barH)
+  ctx.opaque = false
+
+  // 底轨
+  var track = new Path()
+  track.addRoundedRect(new Rect(0, 0, barW, barH), 3, 3)
+  ctx.addPath(track)
+  ctx.setFillColor(new Color("ffffff", 0.06))
+  ctx.fillPath()
+
+  // 降雨填充
+  var p = parseFloat(precip) || 0
+  var h = Math.round((p / maxPrecip) * barH * 0.9)
+  if (h < 3 && p > 0) h = 3
+
+  if (h > 0) {
+    var y = barH - h
+    var rect = new Path()
+    rect.addRoundedRect(new Rect(0, y, barW, h), 3, 3)
+    ctx.addPath(rect)
+
+    if (p >= 2)      ctx.setFillColor(new Color("#1d4ed8"))
+    else if (p >= 1)  ctx.setFillColor(new Color("#2563eb"))
+    else if (p >= 0.5) ctx.setFillColor(new Color("#3b82f6"))
+    else              ctx.setFillColor(new Color("#60a5fa"))
+    ctx.fillPath()
+  }
+
+  return ctx.getImage()
+}
+
+// ★ 新增: 降雨趋势描述
+function precipSummary(hours, count) {
+  var first = parseFloat(hours[0].precip) || 0
+  var idx   = Math.min(hours.length - 1, count - 1)
+  var last  = parseFloat(hours[idx].precip) || 0
+  var max   = 0
+  for (var i = 0; i < Math.min(hours.length, count); i++) {
+    var p = parseFloat(hours[i].precip) || 0
+    if (p > max) max = p
+  }
+  if (max >= 5)            return "暴雨，注意安全"
+  if (max >= 2)            return "大雨持续中"
+  if (first > last + 0.5)  return "雨势逐渐减弱"
+  if (last > first + 0.5)  return "雨势逐渐增强"
+  if (max >= 0.5)          return "中雨持续"
+  return "小雨淅沥"
+}
+
+// ★ 新增: 降雨量预报组件区块
+function addPrecipSection(w, hourly, count, barW, barH) {
+  var hours = hourly.slice(0, count)
+
+  // 标题行: 图标 + 标题 + 趋势
+  var titleRow = w.addStack()
+  titleRow.layoutHorizontally()
+  titleRow.centerAlignContent()
+  var dropIcon = titleRow.addImage(sfImage("cloud.rain.fill", 11))
+  dropIcon.imageSize = new Size(11, 11)
+  titleRow.addSpacer(4)
+  var titleLabel = titleRow.addText("未来降雨")
+  titleLabel.font = Font.mediumSystemFont(11)
+  titleLabel.textColor = new Color("ffffff", 0.4)
+  titleRow.addSpacer()
+  var summaryLabel = titleRow.addText(precipSummary(hours, count))
+  summaryLabel.font = Font.regularSystemFont(10)
+  summaryLabel.textColor = new Color("#60a5fa")
+
+  w.addSpacer(6)
+
+  // 计算最大降雨量
+  var maxP = 0.1
+  for (var i = 0; i < hours.length; i++) {
+    var p = parseFloat(hours[i].precip) || 0
+    if (p > maxP) maxP = p
+  }
+
+  // 逐时柱状图
+  var hr = w.addStack()
+  hr.layoutHorizontally()
+
+  for (var i = 0; i < hours.length; i++) {
+    if (i > 0) hr.addSpacer()
+    var col = hr.addStack()
+    col.layoutVertically()
+    col.centerAlignContent()
+
+    // 时间
+    var tm = col.addText(formatHourLabel(hours[i].fxTime))
+    tm.font = Font.regularSystemFont(10)
+    tm.textColor = new Color("ffffff", 0.6)
+    tm.centerAlignText()
+
+    col.addSpacer(3)
+
+    // 降雨柱
+    var barImg = col.addImage(drawPrecipBar(hours[i].precip, maxP, barW, barH))
+    barImg.imageSize = new Size(barW, barH)
+
+    col.addSpacer(3)
+
+    // 降雨量数值
+    var pmVal = (parseFloat(hours[i].precip) || 0).toFixed(1)
+    var pm = col.addText(pmVal)
+    pm.font = Font.regularSystemFont(9)
+    pm.textColor = new Color("ffffff", 0.5)
+    pm.centerAlignText()
+  }
+  hr.addSpacer()
+}
+
 function addDetailRow(stack, iconName, text) {
   var row = stack.addStack(); row.layoutHorizontally(); row.centerAlignContent()
   var img = sfImageLight(iconName, 10)
@@ -208,7 +329,7 @@ function addDivider(stack, opacity) {
   bar.size = new Size(0, 0.5); stack.addSpacer(10)
 }
 
-// —————————————— 配置管理 ——————————————
+// —————————————— 配置 / 缓存 / API ——————————————
 
 function loadConfig() {
   try {
@@ -242,17 +363,13 @@ function loadCache(apiKey, cityId) {
 
 function saveCache(apiKey, cityId, data) {
   try {
-    fm.writeString(cachePath, JSON.stringify({
-      apiKey: apiKey, cityId: cityId, ts: Date.now(), data: data
-    }))
+    fm.writeString(cachePath, JSON.stringify({ apiKey: apiKey, cityId: cityId, ts: Date.now(), data: data }))
   } catch (e) { /* ignore */ }
 }
 
 function clearCache() {
   try { if (fm.fileExists(cachePath)) fm.remove(cachePath) } catch (e) { /* ignore */ }
 }
-
-// —————————————— API ——————————————
 
 async function apiRequest(path, apiKey) {
   var sep = path.includes("?") ? "&" : "?"
@@ -352,7 +469,7 @@ function buildLockInline(data) {
 }
 
 // =============================================
-//  主屏幕 · 小组件
+//  主屏幕 · 小组件 (不变)
 // =============================================
 
 function buildSmall(data) {
@@ -384,7 +501,7 @@ function buildSmall(data) {
 }
 
 // =============================================
-//  主屏幕 · 中组件
+//  主屏幕 · 中组件 ★ 下雨时切换为降雨量
 // =============================================
 
 function buildMedium(data) {
@@ -395,6 +512,7 @@ function buildMedium(data) {
   w.backgroundGradient = createBg(now.icon); w.setPadding(14, 18, 14, 18)
   w.url = "https://www.qweather.com/weather/" + city.id + ".html"
 
+  // —— 上半区: 当前天气 (不变) ——
   var top = w.addStack(); top.layoutHorizontally(); top.centerAlignContent()
   var iv = top.addImage(sfImage(icon, 36)); iv.imageSize = new Size(36, 36); top.addSpacer(10)
   var info = top.addStack(); info.layoutVertically()
@@ -415,24 +533,33 @@ function buildMedium(data) {
   addDetailRow(dc, "wind", now.windScale + "级"); dc.addSpacer(3)
   addAQIRow(dc, air)
 
+  // —— 分割线 ——
   addDivider(w, 0.15)
 
-  var hr = w.addStack(); hr.layoutHorizontally()
-  var hours = hourly.slice(0, 6)
-  for (var i = 0; i < hours.length; i++) {
-    if (i > 0) hr.addSpacer()
-    var col = hr.addStack(); col.layoutVertically(); col.centerAlignContent(); col.size = new Size(44, 0)
-    var tm = col.addText(formatHourLabel(hours[i].fxTime)); tm.font = Font.regularSystemFont(10); tm.textColor = new Color("ffffff", 0.6); tm.centerAlignText()
-    col.addSpacer(3)
-    var hi = col.addImage(sfImage(getSFIcon(hours[i].icon), 18)); hi.imageSize = new Size(18, 18)
-    col.addSpacer(3)
-    var ht = col.addText(hours[i].temp + "°"); ht.font = Font.mediumSystemFont(13); ht.textColor = Color.white(); ht.centerAlignText()
+  // ★ 下半区: 根据天气切换
+  if (isRain(now.icon)) {
+    // 下雨 → 显示未来降雨量
+    addPrecipSection(w, hourly, 6, 20, 32)
+  } else {
+    // 不下雨 → 正常逐小时预报
+    var hr = w.addStack(); hr.layoutHorizontally()
+    var hours = hourly.slice(0, 6)
+    for (var i = 0; i < hours.length; i++) {
+      if (i > 0) hr.addSpacer()
+      var col = hr.addStack(); col.layoutVertically(); col.centerAlignContent(); col.size = new Size(44, 0)
+      var tm = col.addText(formatHourLabel(hours[i].fxTime)); tm.font = Font.regularSystemFont(10); tm.textColor = new Color("ffffff", 0.6); tm.centerAlignText()
+      col.addSpacer(3)
+      var hi = col.addImage(sfImage(getSFIcon(hours[i].icon), 18)); hi.imageSize = new Size(18, 18)
+      col.addSpacer(3)
+      var ht = col.addText(hours[i].temp + "°"); ht.font = Font.mediumSystemFont(13); ht.textColor = Color.white(); ht.centerAlignText()
+    }
   }
+
   return w
 }
 
 // =============================================
-//  主屏幕 · 大组件 ★ 修复偏左
+//  主屏幕 · 大组件 ★ 下雨时 7日→降雨量
 // =============================================
 
 function buildLarge(data) {
@@ -475,83 +602,79 @@ function buildLarge(data) {
   addDetailRow(det, "eye.fill", "能见度 " + now.vis + "km"); det.addSpacer(3)
   addAQIRow(det, air)
 
-  // ========== 逐小时预报 ★ spacer 均匀撑满 ==========
+  // ========== 逐小时预报 (不变) ==========
   w.addSpacer(12)
   addSectionTitle(w, "24 小时预报")
   w.addSpacer(6)
 
-  var hr = w.addStack()
-  hr.layoutHorizontally()
+  var hr = w.addStack(); hr.layoutHorizontally()
   var hours = hourly.slice(0, 8)
 
   for (var i = 0; i < hours.length; i++) {
     if (i > 0) hr.addSpacer()
-    var hCol = hr.addStack()
-    hCol.layoutVertically()
-    hCol.centerAlignContent()
-
+    var hCol = hr.addStack(); hCol.layoutVertically(); hCol.centerAlignContent()
     var hTime = hCol.addText(formatHourLabel(hours[i].fxTime))
-    hTime.font = Font.regularRoundedSystemFont(9)
-    hTime.textColor = new Color("ffffff", 0.5)
-    hTime.centerAlignText()
+    hTime.font = Font.regularRoundedSystemFont(9); hTime.textColor = new Color("ffffff", 0.5); hTime.centerAlignText()
     hCol.addSpacer(2)
-    var hIcon = hCol.addImage(sfImage(getSFIcon(hours[i].icon), 16))
-    hIcon.imageSize = new Size(16, 16)
+    var hIcon = hCol.addImage(sfImage(getSFIcon(hours[i].icon), 16)); hIcon.imageSize = new Size(16, 16)
     hCol.addSpacer(2)
     var hTemp = hCol.addText(hours[i].temp + "°")
-    hTemp.font = Font.mediumSystemFont(11)
-    hTemp.textColor = Color.white()
-    hTemp.centerAlignText()
+    hTemp.font = Font.mediumSystemFont(11); hTemp.textColor = Color.white(); hTemp.centerAlignText()
   }
   hr.addSpacer()
 
   // ========== 分割线 ==========
   addDivider(w, 0.12)
 
-  // ========== 7 日预报 ==========
-  addSectionTitle(w, "7 日天气预报")
-  w.addSpacer(6)
+  // ★ 底部: 根据天气切换
+  if (isRain(now.icon)) {
+    // 下雨 → 显示未来降雨量
+    addPrecipSection(w, hourly, 10, 22, 38)
+  } else {
+    // 不下雨 → 正常 7 日预报
+    addSectionTitle(w, "7 日天气预报")
+    w.addSpacer(6)
 
-  var globalMin = Infinity, globalMax = -Infinity
-  for (var j = 0; j < daily.length; j++) {
-    var tMin = parseInt(daily[j].tempMin, 10), tMax = parseInt(daily[j].tempMax, 10)
-    if (tMin < globalMin) globalMin = tMin
-    if (tMax > globalMax) globalMax = tMax
-  }
+    var globalMin = Infinity, globalMax = -Infinity
+    for (var j = 0; j < daily.length; j++) {
+      var tMin = parseInt(daily[j].tempMin, 10), tMax = parseInt(daily[j].tempMax, 10)
+      if (tMin < globalMin) globalMin = tMin
+      if (tMax > globalMax) globalMax = tMax
+    }
 
-  var days = daily.slice(0, 7)
-  var BAR_W = 90
+    var days = daily.slice(0, 7)
+    var BAR_W = 90
 
-  for (var k = 0; k < days.length; k++) {
-    var row = w.addStack()
-    row.layoutHorizontally(); row.centerAlignContent()
+    for (var k = 0; k < days.length; k++) {
+      var row = w.addStack(); row.layoutHorizontally(); row.centerAlignContent()
 
-    var dayLabel = row.addText(formatDayShort(days[k].fxDate))
-    dayLabel.font = k === 0 ? Font.semiboldSystemFont(12) : Font.regularSystemFont(12)
-    dayLabel.textColor = k === 0 ? Color.white() : new Color("ffffff", 0.85)
-    dayLabel.lineLimit = 1
+      var dayLabel = row.addText(formatDayShort(days[k].fxDate))
+      dayLabel.font = k === 0 ? Font.semiboldSystemFont(12) : Font.regularSystemFont(12)
+      dayLabel.textColor = k === 0 ? Color.white() : new Color("ffffff", 0.85)
+      dayLabel.lineLimit = 1
 
-    row.addSpacer(8)
-    var dIcon = row.addImage(sfImage(getSFIcon(days[k].iconDay), 14)); dIcon.imageSize = new Size(14, 14)
-    row.addSpacer(6)
-    var dDesc = row.addText(getWeatherDesc(days[k].iconDay))
-    dDesc.font = Font.regularSystemFont(10); dDesc.textColor = new Color("ffffff", 0.5)
+      row.addSpacer(8)
+      var dIcon = row.addImage(sfImage(getSFIcon(days[k].iconDay), 14)); dIcon.imageSize = new Size(14, 14)
+      row.addSpacer(6)
+      var dDesc = row.addText(getWeatherDesc(days[k].iconDay))
+      dDesc.font = Font.regularSystemFont(10); dDesc.textColor = new Color("ffffff", 0.5)
 
-    row.addSpacer()
-    var lo = row.addText(days[k].tempMin + "°")
-    lo.font = Font.regularSystemFont(12); lo.textColor = new Color("ffffff", 0.45)
-    row.addSpacer(4)
+      row.addSpacer()
+      var lo = row.addText(days[k].tempMin + "°")
+      lo.font = Font.regularSystemFont(12); lo.textColor = new Color("ffffff", 0.45)
+      row.addSpacer(4)
 
-    var bar = row.addImage(
-      drawTempBar(parseInt(days[k].tempMin, 10), parseInt(days[k].tempMax, 10), globalMin, globalMax, BAR_W)
-    )
-    bar.imageSize = new Size(BAR_W, 6)
+      var bar = row.addImage(
+        drawTempBar(parseInt(days[k].tempMin, 10), parseInt(days[k].tempMax, 10), globalMin, globalMax, BAR_W)
+      )
+      bar.imageSize = new Size(BAR_W, 6)
 
-    row.addSpacer(4)
-    var hi = row.addText(days[k].tempMax + "°")
-    hi.font = Font.mediumSystemFont(12); hi.textColor = Color.white()
+      row.addSpacer(4)
+      var hi = row.addText(days[k].tempMax + "°")
+      hi.font = Font.mediumSystemFont(12); hi.textColor = Color.white()
 
-    if (k < days.length - 1) w.addSpacer(5)
+      if (k < days.length - 1) w.addSpacer(5)
+    }
   }
 
   return w
